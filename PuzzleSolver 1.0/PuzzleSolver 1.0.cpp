@@ -1282,63 +1282,64 @@ Grid::SolveStatus Grid::SolvePuzzle(const bool IsGuessing, const bool IsVerbose)
 
 
 	// Look for isolated unknown regions.
+
+	const bool any_black_regions = any_of(m_Regions.begin(), m_Regions.end(), [](const shared_ptr<Region>& r) { return r->black(); });
+
+	set<pair<int, int>> analyzed;
+
+	for (int x = 0; x < m_Width; ++x)
 	{
-		const bool any_black_regions = any_of(m_Regions.begin(), m_Regions.end(), [](const shared_ptr<Region>& r) { return r->black(); });
-
-		set<pair<int, int>> analyzed;
-
-		for (int x = 0; x < m_Width; ++x)
+		for (int y = 0; y < m_Height; ++y)
 		{
-			for (int y = 0; y < m_Height; ++y)
+			if (cell(x, y) == State::UNKNOWN && analyzed.find(make_pair(x, y)) == analyzed.end())
 			{
-				if (cell(x, y) == State::UNKNOWN && analyzed.find(make_pair(x, y)) == analyzed.end())
+				// for each cell in the grid, if its state is unknown and we haven't added it to the analyzed set yet.
+
+				bool encountered_black = false;
+
+				set<pair<int, int>> open;
+				set<pair<int, int>> closed;
+
+				open.insert(make_pair(x, y));
+
+				while (!open.empty())
 				{
-					// for each cell in the grid, if its state is unknown and we haven't added it to the analyzed set yet.
+					const pair<int, int> p = *open.begin();
+					open.erase(open.begin());
 
-					bool encountered_black = false;
-
-					set<pair<int, int>> open;
-					set<pair<int, int>> closed;
-
-					open.insert(make_pair(x, y));
-
-					while (!open.empty())
+					switch (cell(p.first, p.second))
 					{
-						const pair<int, int> p = *open.begin();
-						open.erase(open.begin());
-
-						switch (cell(p.first, p.second))
+						case State::UNKNOWN:
 						{
-							case State::UNKNOWN:
+							// if it had not been added to the set of closed cells yet, then insert all its valid neighbors into the open set.
+							if (closed.insert(p).second)
 							{
-								// if it had not been added to the set of closed cells yet, then insert all its valid neighbors into the open set.
-								if (closed.insert(p).second)
-								{
-									InsertValidNeighbors(p.first, p.second, open);
-								}
-								break;
+								InsertValidNeighbors(p.first, p.second, open);
 							}
-							case State::BLACK:
-							{
-								encountered_black = true;
-								break;
-							}
-
-							default:
-								break;
+							break;
 						}
-					}
+						case State::BLACK:
+						{
+							encountered_black = true;
+							break;
+						}
 
-					if (!encountered_black && (any_black_regions || static_cast<int>(closed.size()) < m_Total_Black_Cells))
-					{
-						mark_as_white.insert(closed.begin(), closed.end());
+						default:
+							break;
 					}
-
-					analyzed.insert(closed.begin(), closed.end());
 				}
+
+				if (!encountered_black && (any_black_regions || static_cast<int>(closed.size()) < m_Total_Black_Cells))
+				{
+					mark_as_white.insert(closed.begin(), closed.end());
+				}
+
+				analyzed.insert(closed.begin(), closed.end());
 			}
 		}
 	}
+
+	
 
 	if (process(IsVerbose, mark_as_black, mark_as_white, "solved for isolated cells that are supposed to be white"))
 	{
