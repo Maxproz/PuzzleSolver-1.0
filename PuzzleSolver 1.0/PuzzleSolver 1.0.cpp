@@ -12,6 +12,9 @@
 #include <fstream>
 #include <map>
 #include <algorithm> // std::noneof
+#include <queue> // for use in "unreachable()"
+#include <array> // for the array of XYState in the black squares tests
+#include <random> // for uniform_int_distribution in (IsGuessing) in SolvePuzzle()
 
 // Headers needed for Grid class
 #include <memory>
@@ -97,9 +100,10 @@ class Grid final
 private:
 	enum class State : int
 	{
-		BLACK = -3,
-		WHITE = -2,
-		UNKNOWN = -1
+		UNKNOWN = -3,
+		BLACK = -2,
+		WHITE = -1
+
 		// Numbered > 0
 	};
 
@@ -129,7 +133,7 @@ private:
 		set<pair<int, int>>::const_iterator end() const { return m_Coords.end(); }
 		int size() const { return m_Coords.size(); }
 
-		bool contains(const int x, const int y) const 
+		bool contains(const int x, const int y) const
 		{
 			return m_Coords.find(make_pair(x, y)) != m_Coords.end();
 		}
@@ -146,7 +150,7 @@ private:
 
 		bool numbered() const { return static_cast<int>(m_RegionState) >= 1; }
 
-		const int number() const 
+		const int number() const
 		{
 			if (!numbered())
 				throw std::logic_error("invalid call for number()");
@@ -155,7 +159,7 @@ private:
 				return static_cast<int>(m_RegionState);
 			}
 		}
-		
+
 		set<pair<int, int>>::const_iterator unk_begin() const { return m_Unknowns.begin(); }
 		set<pair<int, int>>::const_iterator unk_end() const { return m_Unknowns.end(); }
 		int unk_size() const { return m_Unknowns.size(); }
@@ -179,7 +183,7 @@ private:
 public:
 	Grid() = delete;
 	Grid(const int Width, const int Height, const Islands& Islands) :
-		m_Width{ Width }, m_Height{ Height }, m_Cells(), m_Regions(), m_Total_Black_Cells(m_Width * m_Height), m_SolveStatus(SolveStatus::KEEP_GOING), m_output()
+		m_Width{ Width }, m_Height{ Height }, m_Cells(), m_Regions(), m_Total_Black_Cells(m_Width * m_Height), m_SolveStatus(SolveStatus::KEEP_GOING), m_output(), m_prng(1742)
 	{
 		if (m_Width <= 0 || m_Height <= 0)
 		{
@@ -211,13 +215,13 @@ public:
 		print("I'm okay to go!");
 	}
 
-	Grid(const Grid& Copy) : 
+	Grid(const Grid& Copy) :
 		m_Width{ Copy.m_Width }, m_Height{ Copy.m_Height }, m_Cells(Copy.m_Cells), m_Regions(), m_Total_Black_Cells(Copy.m_Total_Black_Cells), m_SolveStatus(Copy.m_SolveStatus),
-		m_output(Copy.m_output)
+		m_output(Copy.m_output), m_prng(Copy.m_prng)
 	{
 		// m_Cells doesn't need a deep copy since we change the shared_ptr it points to inside of the function body anyway.
 
-		for (auto i = Copy.m_Regions.begin(); i != Copy.m_Regions.end(); ++i) 
+		for (auto i = Copy.m_Regions.begin(); i != Copy.m_Regions.end(); ++i)
 		{
 			m_Regions.insert(make_shared<Region>(**i));
 		}
@@ -245,7 +249,7 @@ public:
 
 	SolveStatus SolvePuzzle(const bool IsGuessing = true, const bool IsVerbose = true);
 
-	
+
 
 	void write(ostream& os, const long long start, const long long finish) const;
 
@@ -315,7 +319,7 @@ private:
 		const set<pair<int, int>>& mark_as_white, const string& s);
 
 
-	const std::string detect_contradictions(map<shared_ptr<Region>, set<pair<int, int>>>& InCache) const
+	const std::string detect_contradictions(map<shared_ptr<Region>, set<pair<int, int>>>& InCache) 
 	{
 		for (int x = 0; x < m_Width - 1; ++x) {
 			for (int y = 0; y < m_Height - 1; ++y) {
@@ -389,7 +393,7 @@ private:
 	// Is r confined, assuming that we can't consume forbidden cells?
 	bool confined(const shared_ptr<Region>& r,
 		map<shared_ptr<Region>, set<pair<int, int>>>& cache,
-		const set<pair<int, int>>& forbidden = set<pair<int, int>>()) const
+		const set<pair<int, int>>& forbidden = set<pair<int, int>>()) 
 	{
 
 		// When we look for contradictions, we run confinement analysis (A) without forbidden cells.
@@ -399,8 +403,147 @@ private:
 		// During B, if none of the forbidden cells are ones that we consumed,
 		// then the forbidden cells can't confine us.
 
-		return false;
+		if (!forbidden.empty())
+		{
+			const auto i = cache.find(r);
+
+			if (i == cache.end())
+			{
+				return false; // We didn't consume any unknown cells.
+			}
+
+			const auto& consumed = i->second;
+
+			if (none_of(forbidden.begin(), forbidden.end(), [&](const pair<int, int>& p) 
+			{
+				return consumed.find(p) != consumed.end();
+			}))
+			{
+				return false;
+			}
+		}
+
+		// The open set contains cells that we're considering adding to the region.
+		set<pair<int, int>> open(r->unk_begin(), r->unk_end());
+
+		// The closed set contains cells that we've hypothetically added to the region.
+		set<pair<int, int>> closed(r->begin(), r->end());
+
+		// While we have cells to consider and we need to consume more cells...
+		while (!open.empty()
+			&& (r->black() && static_cast<int>(closed.size()) < m_Total_Black_Cells
+				|| r->white()
+				|| r->numbered() && static_cast<int>(closed.size()) < r->number()))
+		{
+
+			// Consider cell p.
+			const pair<int, int> p = *open.begin();
+			open.erase(open.begin());
+
+			// If it's forbidden or we've already consumed it, discard it.
+			if (forbidden.find(p) != forbidden.end() || closed.find(p) != closed.end())
+			{
+				continue;
+			}
+
+			// We need to compare our region r with p's region (if any).
+			const auto& area = region(p.first, p.second);
+
+			if (r->black()) 
+			{
+				if (!area) 
+				{
+					// Keep going. A black region can consume an unknown cell.
+				}
+				else if (area->black()) 
+				{
+					// Keep going. A black region can consume another black region.
+				}
+				else { // area->white() || area->numbered()
+					continue; // We can't consume this. Discard it.
+				}
+			}
+			else if (r->white())
+			{
+				if (!area)
+				{
+					// Keep going. A white region can consume an unknown cell.
+				}
+				else if (area->black())
+				{
+					continue; // We can't consume this. Discard it.
+				}
+				else if (area->white())
+				{
+					// Keep going. A white region can consume another white region.
+				}
+				else 
+				{ // area->numbered()
+					return false; // Yay! Our region r escaped to a numbered region.
+				}
+			}
+			else
+			{ // r->numbered()
+				if (!area)
+				{
+					// A numbered region can't consume an unknown cell
+					// that's adjacent to another numbered region.
+					bool rejected = false;
+
+					For_All_Valid_Neighbors(p.first, p.second, [&](const int x, const int y) 
+					{
+						const auto& other = region(x, y);
+
+						if (other && other->numbered() && other != r) 
+						{
+							rejected = true;
+						}
+					});
+
+					if (rejected)
+					{
+						continue;
+					}
+
+					// Keep going. This unknown cell is okay to consume.
+				}
+				else if (area->black())
+				{
+					continue; // We can't consume this. Discard it.
+				}
+				else if (area->white())
+				{
+					// Keep going. A numbered region can consume a white region.
+				}
+				else
+				{ // area->numbered()
+					throw logic_error("LOGIC ERROR: Grid::confined() - "
+						"I was confused and thought two numbered regions would be adjacent.");
+				}
+			}
+
+			if (!area) 
+			{ // Consume an unknown cell.
+				closed.insert(p);
+				InsertValidNeighbors(p.first, p.second, open);
+
+				if (forbidden.empty()) {
+					cache[r].insert(p);
+				}
+			}
+			else
+			{ // Consume a whole region.
+				closed.insert(area->begin(), area->end());
+				open.insert(area->unk_begin(), area->unk_end());
+			}
+		}
+
+		// We're confined if we still need to consume more cells.
+		return r->black() && static_cast<int>(closed.size()) < m_Total_Black_Cells
+			|| r->white()
+			|| r->numbered() && static_cast<int>(closed.size()) < r->number();
 	}
+
 
 
 	void Swap(Grid& other)
@@ -412,12 +555,12 @@ private:
 		std::swap(m_Total_Black_Cells, other.m_Total_Black_Cells);
 		std::swap(m_SolveStatus, other.m_SolveStatus);
 		std::swap(m_output, other.m_output);
-
+		std::swap(m_prng, other.m_prng);
 	}
 
 
 
-	
+
 
 
 
@@ -541,7 +684,7 @@ private:
 		cell(x, y) = InState;
 
 		// update each region's set of surrounding unknown cells.
-		for (auto i = m_Regions.begin(); i != m_Regions.end(); ++i) 
+		for (auto i = m_Regions.begin(); i != m_Regions.end(); ++i)
 		{
 			(*i)->unk_erase(x, y);
 		}
@@ -556,13 +699,13 @@ private:
 		// Don't attempt to cache these regions.
 		// Each fusion could change this cell's region or its neighbors' regions.
 
-		For_All_Valid_Neighbors(x, y, [this, x, y](const int a, const int b) 
+		For_All_Valid_Neighbors(x, y, [this, x, y](const int a, const int b)
 		{
 			fuse_regions(region(x, y), region(a, b));
 		});
 
 	}
-	
+
 	// Note that r1 and r2 are passed by modifiable value. It's convenient to be able to swap them.
 	void fuse_regions(shared_ptr<Region> r1, shared_ptr<Region> r2)
 	{
@@ -584,7 +727,7 @@ private:
 
 		// Black regions can't be fused with non-black regions.
 
-		if (r1->black() != r2->black()) 
+		if (r1->black() != r2->black())
 		{
 			return;
 		}
@@ -593,7 +736,7 @@ private:
 		// It would be efficient to process as few cells as possible.
 		// Therefore, we'd like to use the bigger region as the primary region.
 
-		if (r2->size() > r1->size()) 
+		if (r2->size() > r1->size())
 		{
 			std::swap(r1, r2);
 		}
@@ -601,7 +744,7 @@ private:
 		// However, if the secondary region is numbered, then the primary region
 		// must be white, so we need to swap them, even if the numbered region is smaller.
 
-		if (r2->numbered()) 
+		if (r2->numbered())
 		{
 			std::swap(r1, r2);
 		}
@@ -628,6 +771,133 @@ private:
 		// as of right now, the shared_ptr count for r2 is 1 (scope of r2 in this function)
 	} // as of right now, the shared_ptr count for r2 is 0 (region pointed to by r2 deleted on the heap)
 
+	bool unreachable(const int x, const int y, std::set<std::pair<int, int>> discovered = std::set<std::pair<int, int>>())
+	{
+		if (cell(x, y) != State::UNKNOWN)
+			return false;
+
+		queue<tuple<int, int, int>> q;
+
+		q.push(make_tuple(x, y, 1));
+		discovered.insert(make_pair(x, y));
+
+		while (!q.empty())
+		{
+			const int XCurr = get<0>(q.front());
+			const int YCurr = get<1>(q.front());
+			const int NCurr = get<2>(q.front());
+
+			q.pop();
+
+
+			set<shared_ptr<Region>> white_regions;
+			set<shared_ptr<Region>> numbered_regions;
+
+			For_All_Valid_Neighbors(XCurr, YCurr, [&](const int x, const int y)
+			{
+				const auto& r = (region(x, y));
+
+				if (r && r->numbered())
+				{
+					numbered_regions.insert(r);
+				}
+			});
+
+			For_All_Valid_Neighbors(XCurr, YCurr, [&](const int x, const int y)
+			{
+				const auto& r = (region(x, y));
+
+				if (!r)
+					return;
+
+				if (r && r->white())
+				{
+					white_regions.insert(r);
+				}
+			});
+
+			int size{ NCurr };
+
+
+			// If we joined a white region or numbered region we need to add its size to our current interation stepping size
+			for (auto i = white_regions.begin(); i != white_regions.end(); ++i)
+			{
+				size += (*i)->size();
+			}
+
+			for (auto i = numbered_regions.begin(); i != numbered_regions.end(); ++i)
+			{
+				size += (*i)->size();
+			}
+
+			// we cant join two numbered regions so (continue)
+			if (numbered_regions.size() > 1)
+			{
+				continue;
+			}
+
+
+			// If we found a region and combined to find the total amount it would take to join the chain of whites with it.
+			// if that total amount is less than or equal to the regions number, then the original cell is not unreachable so return false.
+			// If the total amount is greater than the number then this path still makes the cell unreachable to continue and test remaining paths.
+			if (numbered_regions.size() == 1)
+			{
+				auto OnlyFoundNumberedRegionNearby = (*numbered_regions.begin());
+
+				const int num = OnlyFoundNumberedRegionNearby->number();
+
+				if (size <= num)
+				{
+					return false;
+				}
+				else
+				{
+					continue;
+				}
+			}
+
+			// if we got here nearby numbered regions was 0
+			// but if we found a nearby white region, test all regions to see if connecting with that region would make a white region of a size that couldn't connect with any regions.
+			if (!white_regions.empty())
+			{
+				if (impossibly_big_white_region(size))
+				{
+					continue;
+				}
+				else
+				{
+					return false;
+				}
+			}
+
+			// If we reached here stepping on the cell for this iteration path (pretend making it white), didnt find any adjacent white or numbered regions.
+
+
+			For_All_Valid_Neighbors(XCurr, YCurr,
+				[&](const int x, const int y)
+			{
+				// add all valid neighbors of the cell for this iteration to the stepping queue 
+				// IF
+				// 1. The neighbors state is unknown
+				// AND
+				// 2. we havent already inserted it into our referenced set of pairs. (it will fail to insert this coordinate if it already exists in there.
+				if (cell(x, y) == State::UNKNOWN && discovered.insert(make_pair(x, y)).second)
+				{
+					q.push(make_tuple(x, y, NCurr + 1));
+				}
+			});
+
+		}
+
+		// If the function reaches here, it exhausted each possible iteration by stepping on cells for every possible pathway
+		// and had many chances to return false inside of them.
+		// But it still reached here which means this unknown cell, cannot connect to a white or numbered region.
+
+		return true;
+
+	}
+
+
 private:
 
 	int m_Width{ 0 };
@@ -637,6 +907,9 @@ private:
 	int m_Total_Black_Cells{ 0 };
 
 	SolveStatus m_SolveStatus = SolveStatus::KEEP_GOING;
+
+	// This is used to guess cells in a deterministic but pseudorandomized order.
+	mt19937 m_prng;
 
 	// This stores the output that is generated during solving, to be converted into HTML later.
 	vector<tuple<string, vector<vector<State>>, set<pair<int, int>>, long long>> m_output;
@@ -876,27 +1149,201 @@ Grid::SolveStatus Grid::SolvePuzzle(const bool IsGuessing, const bool IsVerbose)
 	// Look for N - 1 islands with exactly two diagonal liberties.
 
 
+	for (auto regiter = m_Regions.begin(); regiter != m_Regions.end(); ++regiter)
+	{
+		auto r = **regiter;
+
+		if (r.numbered())
+		{
+			if ((r.size() == r.number() - 1) && r.unk_size() == 2)
+			{
+				auto X1 = r.unk_begin()->first;
+				auto Y1 = r.unk_begin()->second;
+
+				auto X2 = next(r.unk_begin())->first;
+				auto Y2 = next(r.unk_begin())->second;
+
+				if (abs(X1 - X2) == 1 && abs(Y1 - Y2) == 1)
+				{
+					pair<int, int> p;
+
+					if (r.contains(X1, Y2))
+					{
+						p = make_pair(X2, Y1);
+					}
+					else
+					{
+						p = make_pair(X1, Y2);
+					}
 
 
 
-	if (process(IsVerbose, mark_as_black, mark_as_white, "N - 1 islands with exactly two diagonal liberties found.")) 
+					if (cell(p.first, p.second) == State::UNKNOWN)
+					{
+						mark_as_black.insert(make_pair(p.first, p.second));
+					}
+
+				}
+			}
+		}
+	}
+
+	if (process(IsVerbose, mark_as_black, mark_as_white, "N - 1 islands with exactly two diagonal liberties found."))
 	{
 		return m_SolveStatus;
 	}
+
 
 	// Look for unreachable cells. They must be black.
 	// This supersedes complete island analysis and forbidden bridge analysis.
 	// (We run complete island analysis above because it's fast
 	// and it makes the output easier to understand.)
+	for (int x = 0; x < m_Width; ++x)
+	{
+		for (int y = 0; y < m_Height; ++y)
+		{
+			if (unreachable(x, y))
+			{
+				mark_as_black.insert(make_pair(x, y));
+			}
+		}
+	}
 
-
-
+	if (process(IsVerbose, mark_as_black, mark_as_white, "Found unreachable cells"))
+	{
+		return m_SolveStatus;
+	}
 
 	// Look for squares of one unknown and three black cells, or two unknown and two black cells.
+	for (int x = 0; x < m_Width - 1; ++x)
+	{
+		for (int y = 0; y < m_Height - 1; ++y)
+		{
+			struct XYState
+			{
+				int x;
+				int y;
+				Grid::State state;
+			};
+
+			array<XYState, 4> a = { {
+				{ x, y, cell(x, y) },
+				{ x + 1, y, cell(x + 1, y) },
+				{ x, y + 1, cell(x, y + 1) },
+				{ x + 1, y + 1, cell(x + 1, y + 1) }
+				} };
+
+			static_assert(State::UNKNOWN < State::BLACK, "This code assumes that UNKNOWN < BLACK.");
+
+			sort(a.begin(), a.end(), [](const XYState& l, const XYState& r) {
+				return l.state < r.state;
+			});
+
+			if (a[0].state == State::UNKNOWN
+				&& a[1].state == State::BLACK
+				&& a[2].state == State::BLACK
+				&& a[3].state == State::BLACK) {
+
+				mark_as_white.insert(make_pair(a[0].x, a[0].y));
+
+			}
+			else if (a[0].state == State::UNKNOWN
+				&& a[1].state == State::UNKNOWN
+				&& a[2].state == State::BLACK
+				&& a[3].state == State::BLACK)
+			{
+
+				for (int i = 0; i < 2; ++i)
+				{
+					set<pair<int, int>> imagine_black;
+
+					imagine_black.insert(make_pair(a[0].x, a[0].y));
+
+					// here we are testing the unknown cells one by one.
+					// each time testing if "imagining" one cell as black will make the other unreachable.
+					// if so mark the cell we "imagined" as black as white
+					if (unreachable(a[1].x, a[1].y, imagine_black))
+					{
+						mark_as_white.insert(make_pair(a[0].x, a[0].y));
+					}
+
+					// If not unreachable it will swap the x/y's in the array of the unknowns and run the same test.
+					std::swap(a[0], a[1]);
+				}
+			}
+		}
+	}
+
+	if (process(IsVerbose, mark_as_black, mark_as_white, "Whitened cells to prevent pools."))
+	{
+		return m_SolveStatus;
+	}
+
 
 
 	// Look for isolated unknown regions.
-	
+	{
+		const bool any_black_regions = any_of(m_Regions.begin(), m_Regions.end(), [](const shared_ptr<Region>& r) { return r->black(); });
+
+		set<pair<int, int>> analyzed;
+
+		for (int x = 0; x < m_Width; ++x)
+		{
+			for (int y = 0; y < m_Height; ++y)
+			{
+				if (cell(x, y) == State::UNKNOWN && analyzed.find(make_pair(x, y)) == analyzed.end())
+				{
+					// for each cell in the grid, if its state is unknown and we haven't added it to the analyzed set yet.
+
+					bool encountered_black = false;
+
+					set<pair<int, int>> open;
+					set<pair<int, int>> closed;
+
+					open.insert(make_pair(x, y));
+
+					while (!open.empty())
+					{
+						const pair<int, int> p = *open.begin();
+						open.erase(open.begin());
+
+						switch (cell(p.first, p.second))
+						{
+							case State::UNKNOWN:
+							{
+								// if it had not been added to the set of closed cells yet, then insert all its valid neighbors into the open set.
+								if (closed.insert(p).second)
+								{
+									InsertValidNeighbors(p.first, p.second, open);
+								}
+								break;
+							}
+							case State::BLACK:
+							{
+								encountered_black = true;
+								break;
+							}
+
+							default:
+								break;
+						}
+					}
+
+					if (!encountered_black && (any_black_regions || static_cast<int>(closed.size()) < m_Total_Black_Cells))
+					{
+						mark_as_white.insert(closed.begin(), closed.end());
+					}
+
+					analyzed.insert(closed.begin(), closed.end());
+				}
+			}
+		}
+	}
+
+	if (process(IsVerbose, mark_as_black, mark_as_white, "solved for isolated cells that are supposed to be white"))
+	{
+		return m_SolveStatus;
+	}
 
 
 	// Look for Confinement
@@ -929,13 +1376,143 @@ Grid::SolveStatus Grid::SolvePuzzle(const bool IsGuessing, const bool IsVerbose)
 	//   three 'x' cells. (This is true regardless of what other cells region 3 would
 	//   eventually occupy.)
 
+	for (int x = 0; x < m_Width; ++x)
+	{
+		for (int y = 0; y < m_Height; ++y)
+		{
+			if (cell(x, y) == State::UNKNOWN)
+			{
+				set<pair<int, int>> forbidden;
+				forbidden.insert(make_pair(x, y));
 
-	// If we get here, try guessing cells repeatedly to see if we can figure out what to mark a cell
-	// If (IsGuessing)
-	// {
-			// Try to guess the rest if stuck
+				for (auto i = m_Regions.begin(); i != m_Regions.end(); ++i)
+				{
+					const Region& r = **i;
 
-	// }
+					if (confined(*i, cache, forbidden)) 
+					{
+						if (r.black())
+						{
+							mark_as_black.insert(make_pair(x, y));
+						}
+						else 
+						{
+							mark_as_white.insert(make_pair(x, y));
+						}
+					}
+				}
+			}
+		}
+	}
+
+	for (auto i = m_Regions.begin(); i != m_Regions.end(); ++i)
+	{
+		const Region& r = **i;
+
+		if (r.numbered() && r.size() < r.number()) {
+			for (auto u = r.unk_begin(); u != r.unk_end(); ++u) 
+			{
+				set<pair<int, int>> forbidden;
+				forbidden.insert(*u);
+
+				InsertValidUnknownNeighbors(u->first, u->second, forbidden);
+
+				for (auto k = m_Regions.begin(); k != m_Regions.end(); ++k) 
+				{
+					if (k != i && (*k)->numbered() && confined(*k, cache, forbidden))
+					{
+						mark_as_black.insert(*u);
+					}
+				}
+			}
+		}
+	}
+
+	if (process(IsVerbose, mark_as_black, mark_as_white, "Confinement analysis succeeded."))
+	{
+		return m_SolveStatus;
+	}
+
+
+
+	if (IsGuessing)
+	{
+		vector<pair<int, int>> v;
+
+		for (int x = 0; x < m_Width; ++x) {
+			for (int y = 0; y < m_Height; ++y) 
+			{
+				if (cell(x, y) == State::UNKNOWN)
+				{
+					v.push_back(make_pair(x, y));
+				}
+			}
+		}
+
+		// Guess cells in a deterministic but pseudorandomized order.
+		// This attempts to avoid repeatedly guessing cells that won't get us anywhere.
+		 
+		auto dist = [this](const ptrdiff_t n) {
+			// random_shuffle() provides n > 0. It wants [0, n).
+			// uniform_int_distribution's ctor takes a and b with a <= b. It produces [a, b].
+			return uniform_int_distribution<ptrdiff_t>(0, n - 1)(m_prng);
+		};
+
+		random_shuffle(v.begin(), v.end(), dist);
+
+
+
+		for (auto u = v.begin(); u != v.end(); ++u) 
+		{
+			const int x = u->first;
+			const int y = u->second;
+
+			// for each unknown cell on the grid we imagine it as black and then imagine it as white if black doesnt find a contradiction
+
+			for (int i = 0; i < 2; ++i) 
+			{
+				const State color = i == 0 ? State::BLACK : State::WHITE;
+				auto& mark_as_diff = i == 0 ? mark_as_white : mark_as_black;
+				auto& mark_as_same = i == 0 ? mark_as_black : mark_as_white;
+
+				Grid other(*this);
+
+				//cout << std::addressof(other.)
+
+				other.mark(color, x, y);
+
+				SolveStatus sr = KEEP_GOING;
+
+				while (sr == KEEP_GOING) 
+				{
+					sr = other.SolvePuzzle(false, false);
+				}
+
+				if (sr == CONTRADICTION)
+				{
+					mark_as_diff.insert(make_pair(x, y));
+					process(IsVerbose, mark_as_black, mark_as_white,
+						"Hypothetical contradiction found.");
+					return m_SolveStatus;
+				} 
+
+
+				// don't really need this code pathway i think.
+				if (sr == SOLUTION_FOUND)
+				{
+					mark_as_same.insert(make_pair(x, y));
+					process(IsVerbose, mark_as_black, mark_as_white,
+						"Hypothetical solution found.");
+					return m_SolveStatus;
+				}
+
+				// sr == CANNOT_PROCEED
+			}
+		}
+	}
+
+
+
 
 
 	if (IsVerbose)
@@ -968,7 +1545,6 @@ int main()
 
 	Grid Gameboard(NurikabeHard.m_Width, NurikabeHard.m_Height, NurikabeHard.m_Islands);
 
-	//Gameboard.PrintGameBoard();
 
 	try
 	{
